@@ -12,3 +12,5 @@ services:
         value: "False"
       - key: ALLOWED_HOSTS
         value: ".onrender.com"
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/project/.playwright

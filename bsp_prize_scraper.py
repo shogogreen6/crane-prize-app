@@ -15,9 +15,18 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+except ImportError:  # pragma: no cover - handled at runtime
+    PlaywrightTimeoutError = None
+    sync_playwright = None
 
-BASE_URL = "https://bsp-prize.jp/search/"
-SITE_ROOT = "https://bsp-prize.jp"
+
+BSP_SEARCH_URL = "https://bsp-prize.jp/search/"
+BSP_SITE_ROOT = "https://bsp-prize.jp"
+SEGA_SEARCH_URL = "https://segaplaza.jp/search/"
+SEGA_SITE_ROOT = "https://segaplaza.jp"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -27,12 +36,23 @@ USER_AGENT = (
 
 @dataclass
 class PrizeItem:
+    site: str
     keyword: str
     name: str
     date_text: str
     image_url: str
     page: int
     sort_date: date | None
+    source_url: str
+
+
+@dataclass
+class ProgressReporter:
+    enabled: bool = False
+
+    def log(self, message: str) -> None:
+        if self.enabled:
+            print(f"[progress] {message}", file=sys.stderr, flush=True)
 
 
 def build_session() -> requests.Session:
@@ -41,10 +61,10 @@ def build_session() -> requests.Session:
     return session
 
 
-def normalize_image_url(src: str | None) -> str:
+def normalize_image_url(src: str | None, site_root: str) -> str:
     if not src:
         return ""
-    return urljoin(SITE_ROOT, src)
+    return urljoin(site_root, src)
 
 
 def parse_products_date(date_text: str) -> date | None:
@@ -76,9 +96,37 @@ def parse_cli_date(value: str | None) -> date | None:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def fetch_page(session: requests.Session, keyword: str, page: int) -> list[PrizeItem]:
+def in_period(item: PrizeItem, start_date: date | None, end_date: date | None) -> bool:
+    if start_date is None and end_date is None:
+        return True
+    if item.sort_date is None:
+        return False
+    if start_date and item.sort_date < start_date:
+        return False
+    if end_date and item.sort_date > end_date:
+        return False
+    return True
+
+
+def should_stop_early(page_items: Iterable[PrizeItem], start_date: date | None) -> bool:
+    if start_date is None:
+        return False
+
+    sortable_dates = [item.sort_date for item in page_items if item.sort_date is not None]
+    if not sortable_dates:
+        return False
+
+    oldest_on_page = min(sortable_dates)
+    return oldest_on_page < start_date
+
+
+def fetch_bsp_page(
+    session: requests.Session,
+    keyword: str,
+    page: int,
+) -> list[PrizeItem]:
     response = session.get(
-        BASE_URL,
+        BSP_SEARCH_URL,
         params={"kw": keyword, "page": page},
         timeout=30,
     )
@@ -94,50 +142,163 @@ def fetch_page(session: requests.Session, keyword: str, page: int) -> list[Prize
         img = product.select_one(".products_img img")
         name_node = product.select_one(".products_name")
         date_node = product.select_one(".products_date")
+        link_node = product.select_one("a[href]")
 
         name = name_node.get_text(" ", strip=True) if name_node else ""
         date_text = date_node.get_text(" ", strip=True) if date_node else ""
-        image_url = normalize_image_url(img.get("src") if img else None)
+        image_url = normalize_image_url(img.get("src") if img else None, BSP_SITE_ROOT)
+        source_url = normalize_image_url(link_node.get("href") if link_node else None, BSP_SITE_ROOT)
 
         items.append(
             PrizeItem(
+                site="BANDAI SPIRITS",
                 keyword=keyword,
                 name=name,
                 date_text=date_text,
                 image_url=image_url,
                 page=page,
                 sort_date=parse_products_date(date_text),
+                source_url=source_url or response.url,
             )
         )
 
     return items
 
 
-def should_stop_early(
-    page_items: Iterable[PrizeItem],
+def collect_bsp_prizes(
+    keywords: list[str],
     start_date: date | None,
-) -> bool:
-    if start_date is None:
-        return False
+    end_date: date | None,
+    delay: float,
+    reporter: ProgressReporter,
+) -> list[PrizeItem]:
+    session = build_session()
+    collected: list[PrizeItem] = []
 
-    sortable_dates = [item.sort_date for item in page_items if item.sort_date is not None]
-    if not sortable_dates:
-        return False
+    for keyword in keywords:
+        reporter.log(f"BSP start keyword='{keyword}'")
+        page = 1
+        while True:
+            reporter.log(f"BSP fetching keyword='{keyword}' page={page}")
+            page_items = fetch_bsp_page(session, keyword, page)
+            if not page_items:
+                reporter.log(f"BSP finished keyword='{keyword}' page={page} reason=empty_page")
+                break
 
-    oldest_on_page = min(sortable_dates)
-    return oldest_on_page < start_date
+            matched_items = [
+                item for item in page_items if in_period(item, start_date, end_date)
+            ]
+            collected.extend(matched_items)
+            reporter.log(
+                "BSP page complete "
+                f"keyword='{keyword}' page={page} "
+                f"page_items={len(page_items)} matched={len(matched_items)}"
+            )
+
+            if should_stop_early(page_items, start_date):
+                reporter.log(
+                    f"BSP finished keyword='{keyword}' page={page} reason=older_than_start_date"
+                )
+                break
+
+            page += 1
+            if delay > 0:
+                time.sleep(delay)
+
+    return collected
 
 
-def in_period(item: PrizeItem, start_date: date | None, end_date: date | None) -> bool:
-    if start_date is None and end_date is None:
-        return True
-    if item.sort_date is None:
-        return False
-    if start_date and item.sort_date < start_date:
-        return False
-    if end_date and item.sort_date > end_date:
-        return False
-    return True
+def collect_sega_prizes(
+    keywords: list[str],
+    start_date: date | None,
+    end_date: date | None,
+    delay: float,
+    reporter: ProgressReporter,
+) -> list[PrizeItem]:
+    if sync_playwright is None or PlaywrightTimeoutError is None:
+        raise RuntimeError(
+            "SEGA Plaza scraping requires Playwright. "
+            "Install it with 'pip install playwright' and "
+            "run 'python -m playwright install chromium'."
+        )
+
+    collected: list[PrizeItem] = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=USER_AGENT)
+
+        try:
+            for keyword in keywords:
+                reporter.log(f"SEGA start keyword='{keyword}'")
+                page = context.new_page()
+                page_number = 1
+                try:
+                    reporter.log(f"SEGA opening search page keyword='{keyword}'")
+                    page.goto(
+                        SEGA_SEARCH_URL,
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+                    page.goto(
+                        f"{SEGA_SEARCH_URL}?q={keyword}&type=prize&limit=500",
+                        wait_until="networkidle",
+                        timeout=60000,
+                    )
+
+                    try:
+                        page.wait_for_selector(".itemList", timeout=20000)
+                    except PlaywrightTimeoutError:
+                        pass
+
+                    # Results are client-rendered, so a small extra wait makes
+                    # the list more reliable after the container appears.
+                    page.wait_for_timeout(int(max(delay, 0.3) * 1000))
+
+                    items = page.query_selector_all(".itemList .item")
+                    matched_count = 0
+                    for item in items:
+                        name_node = item.query_selector(".textInfo .itemName")
+                        date_node = item.query_selector(".textInfo .tag-text-date")
+                        image_node = item.query_selector(".thumbnail img")
+                        link_node = item.query_selector("a[href]")
+
+                        name = name_node.inner_text().strip() if name_node else ""
+                        date_text = date_node.inner_text().strip() if date_node else ""
+                        image_url = normalize_image_url(
+                            image_node.get_attribute("src") if image_node else None,
+                            SEGA_SITE_ROOT,
+                        )
+                        source_url = normalize_image_url(
+                            link_node.get_attribute("href") if link_node else None,
+                            SEGA_SITE_ROOT,
+                        )
+
+                        prize = PrizeItem(
+                            site="SEGA Plaza",
+                            keyword=keyword,
+                            name=name,
+                            date_text=date_text,
+                            image_url=image_url,
+                            page=page_number,
+                            sort_date=parse_products_date(date_text),
+                            source_url=source_url or page.url,
+                        )
+                        if in_period(prize, start_date, end_date):
+                            collected.append(prize)
+                            matched_count += 1
+                    reporter.log(
+                        "SEGA page complete "
+                        f"keyword='{keyword}' page={page_number} "
+                        f"page_items={len(items)} matched={matched_count}"
+                    )
+                finally:
+                    page.close()
+                    reporter.log(f"SEGA finished keyword='{keyword}'")
+        finally:
+            context.close()
+            browser.close()
+
+    return collected
 
 
 def collect_prizes(
@@ -145,61 +306,79 @@ def collect_prizes(
     start_date: date | None,
     end_date: date | None,
     delay: float,
+    sites: list[str],
+    reporter: ProgressReporter,
 ) -> list[PrizeItem]:
-    session = build_session()
     collected: list[PrizeItem] = []
+    reporter.log(
+        f"collect start sites={','.join(sites)} keywords={len(keywords)} "
+        f"start_date={start_date} end_date={end_date}"
+    )
 
-    for keyword in keywords:
-        page = 1
-        while True:
-            page_items = fetch_page(session, keyword, page)
-            if not page_items:
-                break
+    if "bsp" in sites:
+        collected.extend(
+            collect_bsp_prizes(
+                keywords=keywords,
+                start_date=start_date,
+                end_date=end_date,
+                delay=delay,
+                reporter=reporter,
+            )
+        )
 
-            matched = [item for item in page_items if in_period(item, start_date, end_date)]
-            collected.extend(matched)
-
-            if should_stop_early(page_items, start_date):
-                break
-
-            page += 1
-            if delay > 0:
-                time.sleep(delay)
+    if "segaplaza" in sites:
+        collected.extend(
+            collect_sega_prizes(
+                keywords=keywords,
+                start_date=start_date,
+                end_date=end_date,
+                delay=delay,
+                reporter=reporter,
+            )
+        )
 
     collected.sort(
         key=lambda item: (
             item.sort_date or date.min,
+            item.site,
             item.name,
         ),
         reverse=True,
     )
+    reporter.log(f"collect complete total_items={len(collected)}")
     return collected
 
 
 def render_html(items: list[PrizeItem], title: str) -> str:
     cards = []
     for item in items:
-        sort_date_text = item.sort_date.isoformat() if item.sort_date else "不明"
+        sort_date_text = item.sort_date.isoformat() if item.sort_date else "unknown"
         image_html = (
             f'<img src="{html.escape(item.image_url)}" alt="{html.escape(item.name)}">'
             if item.image_url
             else '<div class="no-image">No Image</div>'
+        )
+        source_html = (
+            f'<a href="{html.escape(item.source_url)}" target="_blank" rel="noreferrer">source</a>'
+            if item.source_url
+            else ""
         )
         cards.append(
             f"""
             <article class="card">
               <div class="thumb">{image_html}</div>
               <div class="meta">
+                <p class="site">{html.escape(item.site)}</p>
                 <p class="keyword">{html.escape(item.keyword)}</p>
                 <h2>{html.escape(item.name)}</h2>
                 <p class="date">{html.escape(item.date_text)}</p>
-                <p class="sub">ソート用日付: {html.escape(sort_date_text)} / 取得ページ: {item.page}</p>
+                <p class="sub">sort_date: {html.escape(sort_date_text)} / page: {item.page} / {source_html}</p>
               </div>
             </article>
             """
         )
 
-    body = "\n".join(cards) if cards else '<p class="empty">条件に一致するプライズは見つかりませんでした。</p>'
+    body = "\n".join(cards) if cards else '<p class="empty">No matching prizes were found.</p>'
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -210,7 +389,7 @@ def render_html(items: list[PrizeItem], title: str) -> str:
   <style>
     :root {{
       color-scheme: light;
-      --bg: #f5f1e8;
+      --bg: #f6f3ea;
       --panel: #fffdf8;
       --line: #d8ccb7;
       --text: #2e261d;
@@ -270,12 +449,16 @@ def render_html(items: list[PrizeItem], title: str) -> str:
       object-fit: cover;
       display: block;
     }}
-    .keyword, .date, .sub, .empty {{
+    .site, .keyword, .date, .sub, .empty {{
       margin: 0;
     }}
-    .keyword {{
+    .site {{
       color: var(--accent);
       font-weight: 700;
+      margin-bottom: 6px;
+    }}
+    .keyword {{
+      color: var(--muted);
       margin-bottom: 8px;
     }}
     h2 {{
@@ -290,6 +473,9 @@ def render_html(items: list[PrizeItem], title: str) -> str:
     .sub {{
       color: var(--muted);
       font-size: 0.9rem;
+    }}
+    .sub a {{
+      color: inherit;
     }}
     .empty {{
       padding: 24px;
@@ -314,7 +500,7 @@ def render_html(items: list[PrizeItem], title: str) -> str:
 <body>
   <main>
     <h1>{html.escape(title)}</h1>
-    <p class="summary">取得件数: {len(items)}件 / 新しい順に表示</p>
+    <p class="summary">items: {len(items)} / newest first / merged across sites</p>
     <section class="grid">
       {body}
     </section>
@@ -326,7 +512,7 @@ def render_html(items: list[PrizeItem], title: str) -> str:
 
 def save_outputs(items: list[PrizeItem], html_path: Path, json_path: Path) -> None:
     html_path.write_text(
-        render_html(items, "バンプレスト プライズ検索結果"),
+        render_html(items, "Prize Search Results"),
         encoding="utf-8",
     )
     json_path.write_text(
@@ -347,69 +533,85 @@ def save_outputs(items: list[PrizeItem], html_path: Path, json_path: Path) -> No
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="バンプレストの検索結果からプライズ情報を収集してHTML出力します。"
+        description="Collect prize item data from BSP and SEGA Plaza and render the merged result as HTML."
     )
     parser.add_argument(
         "--keyword",
         action="append",
         required=True,
-        help="検索キーワード。複数指定したい場合は --keyword を繰り返してください。",
+        help="Search keyword. Repeat --keyword to search multiple anime titles.",
     )
     parser.add_argument(
         "--start-date",
-        help="期間の開始日 (YYYY-MM-DD)。この日付以降のみ取得します。",
+        help="Start date in YYYY-MM-DD format.",
     )
     parser.add_argument(
         "--end-date",
-        help="期間の終了日 (YYYY-MM-DD)。この日付以前のみ取得します。",
+        help="End date in YYYY-MM-DD format.",
+    )
+    parser.add_argument(
+        "--site",
+        action="append",
+        choices=["bsp", "segaplaza"],
+        help="Target site. Repeat to narrow the scrape target. Default is both.",
     )
     parser.add_argument(
         "--output-html",
         default="bsp_prizes.html",
-        help="HTML出力先ファイル。",
+        help="HTML output file.",
     )
     parser.add_argument(
         "--output-json",
         default="bsp_prizes.json",
-        help="JSON出力先ファイル。",
+        help="JSON output file.",
     )
     parser.add_argument(
         "--delay",
         type=float,
         default=0.5,
-        help="ページ取得間隔（秒）。既定値: 0.5",
+        help="Delay between requests or render checks in seconds. Default: 0.5",
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress logs while scraping.",
     )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    reporter = ProgressReporter(enabled=args.progress)
 
     start_date = parse_cli_date(args.start_date)
     end_date = parse_cli_date(args.end_date)
     if start_date and end_date and start_date > end_date:
-        raise ValueError("start-date は end-date 以下にしてください。")
+        raise ValueError("start-date must be less than or equal to end-date.")
 
     keywords = [keyword.strip() for keyword in args.keyword if keyword.strip()]
     if not keywords:
-        raise ValueError("少なくとも1つの keyword を指定してください。")
+        raise ValueError("At least one keyword is required.")
 
+    sites = args.site or ["bsp", "segaplaza"]
     items = collect_prizes(
         keywords=keywords,
         start_date=start_date,
         end_date=end_date,
         delay=args.delay,
+        sites=sites,
+        reporter=reporter,
     )
 
     html_path = Path(args.output_html)
     json_path = Path(args.output_json)
     save_outputs(items, html_path=html_path, json_path=json_path)
+    reporter.log(f"saved html='{html_path.resolve()}' json='{json_path.resolve()}'")
 
-    print(f"取得件数: {len(items)}")
+    print(f"items: {len(items)}")
     print(f"HTML: {html_path.resolve()}")
     print(f"JSON: {json_path.resolve()}")
     if items:
-        print(f"先頭データ: {items[0].name} / {items[0].date_text}")
+        print(f"first: {items[0].site} / {items[0].name} / {items[0].date_text}")
 
     return 0
 
@@ -418,5 +620,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"エラー: {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         raise

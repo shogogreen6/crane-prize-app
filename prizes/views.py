@@ -20,7 +20,7 @@ def index(request):
                     start_date=form.cleaned_data["start_date"],
                     end_date=form.cleaned_data["end_date"],
                     delay=0.5,
-                    sites=["bsp", "segaplaza"],
+                    sites=["bsp"],
                     reporter=ProgressReporter(enabled=False),
                 )
             except Exception as exc:

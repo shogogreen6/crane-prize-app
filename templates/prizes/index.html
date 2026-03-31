@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>プライズ検索</title>
+  <style>
+    :root {
+      --bg: #f4efe5;
+      --paper: #fffdf9;
+      --ink: #2f2418;
+      --muted: #746555;
+      --line: #ddcfbb;
+      --accent: #b85f33;
+      --accent-soft: #f7e3d3;
+      --shadow: 0 18px 44px rgba(74, 46, 22, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Yu Gothic", "Hiragino Sans", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(184, 95, 51, 0.18), transparent 28%),
+        linear-gradient(180deg, #f7f2eb 0%, var(--bg) 100%);
+    }
+    main {
+      width: min(1120px, calc(100% - 28px));
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(2rem, 4vw, 3rem);
+    }
+    .lead {
+      margin: 0 0 24px;
+      color: var(--muted);
+    }
+    .panel {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+    form {
+      display: grid;
+      gap: 20px;
+    }
+    .section-title {
+      margin: 0 0 12px;
+      font-size: 1rem;
+    }
+    .checkbox-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 14px;
+    }
+    .checkbox-grid label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fffaf3;
+    }
+    .date-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .field label {
+      display: block;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    input[type="date"] {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: white;
+      font: inherit;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 20px;
+      background: var(--accent);
+      color: white;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+    .errors, .notice {
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-radius: 14px;
+    }
+    .errors {
+      background: #fff1ef;
+      border: 1px solid #efc5be;
+      color: #8b3325;
+    }
+    .notice {
+      background: var(--accent-soft);
+      border: 1px solid #efc7a8;
+    }
+    .results {
+      margin-top: 24px;
+      display: grid;
+      gap: 18px;
+    }
+    .summary {
+      margin: 18px 0 0;
+      color: var(--muted);
+    }
+    .card {
+      display: grid;
+      grid-template-columns: minmax(160px, 220px) 1fr;
+      gap: 18px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+    .thumb {
+      overflow: hidden;
+      border-radius: 16px;
+      background: #f0e6d9;
+      aspect-ratio: 1 / 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .site, .keyword, .date, .sub {
+      margin: 0;
+    }
+    .site {
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .keyword {
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    h2 {
+      margin: 0 0 10px;
+      font-size: 1.15rem;
+      line-height: 1.5;
+    }
+    .date {
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .sub {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .sub a {
+      color: inherit;
+    }
+    @media (max-width: 760px) {
+      .checkbox-grid,
+      .date-grid,
+      .card {
+        grid-template-columns: 1fr;
+      }
+      .panel {
+        padding: 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>プライズ検索</h1>
+    <p class="lead">BANDAI SPIRITS と SEGA Plaza をまとめて検索し、日付の新しい順に表示します。</p>
+
+    <section class="panel">
+      <form method="get">
+        <div>
+          <h2 class="section-title">作品を選択</h2>
+          <div class="checkbox-grid">
+            {% for checkbox in form.keywords %}
+              <label for="{{ checkbox.id_for_label }}">
+                {{ checkbox.tag }}
+                <span>{{ checkbox.choice_label }}</span>
+              </label>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="date-grid">
+          <div class="field">
+            {{ form.start_date.label_tag }}
+            {{ form.start_date }}
+          </div>
+          <div class="field">
+            {{ form.end_date.label_tag }}
+            {{ form.end_date }}
+          </div>
+        </div>
+
+        <div class="actions">
+          <button type="submit">検索する</button>
+          <span class="hint">日付未指定なら全期間を対象にします。</span>
+        </div>
+
+        {% if form.non_field_errors or form.errors %}
+          <div class="errors">
+            {{ form.non_field_errors }}
+            {{ form.errors }}
+          </div>
+        {% endif %}
+
+        {% if error_message %}
+          <div class="errors">{{ error_message }}</div>
+        {% endif %}
+      </form>
+    </section>
+
+    {% if searched %}
+      <p class="summary">検索結果: {{ items|length }} 件</p>
+      {% if not items and not error_message %}
+        <div class="notice">条件に一致するプライズは見つかりませんでした。</div>
+      {% endif %}
+    {% endif %}
+
+    <section class="results">
+      {% for item in items %}
+        <article class="card">
+          <div class="thumb">
+            {% if item.image_url %}
+              <img src="{{ item.image_url }}" alt="{{ item.name }}">
+            {% else %}
+              <span>No Image</span>
+            {% endif %}
+          </div>
+          <div>
+            <p class="site">{{ item.site }}</p>
+            <p class="keyword">{{ item.keyword }}</p>
+            <h2>{{ item.name }}</h2>
+            <p class="date">{{ item.date_text }}</p>
+            <p class="sub">
+              sort_date: {{ item.sort_date|default:"unknown" }}
+              {% if item.source_url %}
+                / <a href="{{ item.source_url }}" target="_blank" rel="noreferrer">source</a>
+              {% endif %}
+            </p>
+          </div>
+        </article>
+      {% endfor %}
+    </section>
+  </main>
+</body>
+</html>
